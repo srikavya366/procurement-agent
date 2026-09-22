@@ -1,5 +1,11 @@
 import streamlit as st
+import subprocess
+from pathlib import Path
 import pandas as pd
+
+# ---------------------------------------------------
+# PAGE SETUP
+# ---------------------------------------------------
 
 st.set_page_config(
     page_title="Procurement Decision Agent",
@@ -7,16 +13,76 @@ st.set_page_config(
     layout="wide"
 )
 
+PROJECT_DIR = Path(__file__).parent
+DATA_FILE = PROJECT_DIR / "data" / "suppliers.csv"
+OUTPUT_DIR = PROJECT_DIR / "output"
+
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+# ---------------------------------------------------
+# SESSION STATE
+# ---------------------------------------------------
+
+if "recommendation" not in st.session_state:
+    st.session_state.recommendation = None
+
+if "output_file" not in st.session_state:
+    st.session_state.output_file = None
+
+if "claude_details" not in st.session_state:
+    st.session_state.claude_details = None
+
+if "decision" not in st.session_state:
+    st.session_state.decision = "Pending Review"
+
+
+# ---------------------------------------------------
+# HEADER
+# ---------------------------------------------------
+
 st.title("📦 Procurement Decision Agent")
-st.write(
-    "AI-assisted supplier allocation based on cost, quality, delivery, capacity and risk."
+
+st.caption(
+    "Multi-Agent Supplier Allocation using Claude Code"
 )
 
-# Load supplier data
-df = pd.read_csv("data/suppliers.csv")
+st.write(
+    "This agent analyses supplier data using Cost, Performance "
+    "and Risk subagents and recommends how a procurement order "
+    "can be allocated across suppliers."
+)
+
+st.divider()
+
+
+# ---------------------------------------------------
+# LOAD SUPPLIER DATA
+# ---------------------------------------------------
+
+try:
+
+    suppliers = pd.read_csv(DATA_FILE)
+
+except Exception as e:
+
+    st.error(f"Could not load supplier data: {e}")
+    st.stop()
+
 
 st.subheader("Supplier Data")
-st.dataframe(df, use_container_width=True)
+
+st.dataframe(
+    suppliers,
+    width="stretch",
+    hide_index=True
+)
+
+st.divider()
+
+
+# ---------------------------------------------------
+# PURCHASE REQUIREMENT
+# ---------------------------------------------------
 
 st.subheader("Purchase Requirement")
 
@@ -27,97 +93,305 @@ quantity = st.number_input(
     step=500
 )
 
-if st.button("Run Procurement Analysis"):
 
-    st.info("Running Cost, Performance and Risk analysis...")
+# ---------------------------------------------------
+# GET LATEST OUTPUT
+# ---------------------------------------------------
 
-    # Remove high-risk suppliers
-    eligible = df[df["Risk Level"].str.lower() != "high"].copy()
+def get_latest_output():
 
-    # Sort by unit price
-    eligible = eligible.sort_values("Unit Price")
+    files = list(
+        OUTPUT_DIR.glob("recommendation_*.md")
+    )
 
-    remaining = quantity
-    allocation = []
+    if not files:
+        return None
 
-    for _, row in eligible.iterrows():
+    return max(
+        files,
+        key=lambda f: f.stat().st_mtime
+    )
 
-        if remaining <= 0:
-            break
 
-        qty = min(remaining, int(row["Capacity"]))
-        cost = qty * row["Unit Price"]
+# ---------------------------------------------------
+# RUN AGENT BUTTON
+# ---------------------------------------------------
 
-        allocation.append({
-            "Supplier": row["Supplier"],
-            "Units Allocated": qty,
-            "Unit Price": row["Unit Price"],
-            "Cost": cost,
-            "Risk Level": row["Risk Level"]
-        })
+if st.button(
+    "🚀 Run Procurement Agent",
+    type="primary"
+):
 
-        remaining -= qty
+    prompt = f"""
+Run the Procurement Decision Agent for {quantity} units.
 
-    result = pd.DataFrame(allocation)
+Use the existing Cost Analyst, Performance Analyst and Risk Analyst.
 
-    if remaining > 0:
-        st.error(
-            f"Not enough eligible supplier capacity. "
-            f"Shortfall: {remaining} units."
+Use only data/suppliers.csv.
+
+Return:
+
+- Cost Analyst findings
+- Performance Analyst findings
+- Risk Analyst findings
+- Recommended supplier allocation
+- Quantity allocated to each supplier
+- Total procurement cost
+- Key risks
+- Short reasoning
+
+Save the recommendation as a new markdown file inside output/.
+
+Do not finalize the procurement decision.
+
+Keep:
+
+Status: HUMAN APPROVAL REQUIRED
+
+Be concise.
+"""
+
+    with st.spinner(
+        "Claude multi-agent analysis is running. "
+        "This may take 1–4 minutes..."
+    ):
+
+        try:
+
+            result = subprocess.run(
+                ["claude.cmd", "-p"],
+                cwd=str(PROJECT_DIR),
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=240
+            )
+
+        except subprocess.TimeoutExpired:
+
+            st.error(
+                "The agent took more than 4 minutes."
+            )
+
+            st.stop()
+
+        except Exception as e:
+
+            st.error(
+                f"Error while running agent: {e}"
+            )
+
+            st.stop()
+
+
+    # ---------------------------------------------------
+    # CHECK RESULT
+    # ---------------------------------------------------
+
+    if result.returncode != 0:
+
+        st.error("Agent execution failed.")
+
+        st.code(
+            result.stderr
         )
+
     else:
-        total_cost = result["Cost"].sum()
 
-        st.success("Analysis completed")
+        latest_file = get_latest_output()
 
-        st.subheader("Recommended Allocation")
-        st.dataframe(result, use_container_width=True)
+        if latest_file is None:
 
-        st.metric(
-            "Total Procurement Cost",
-            f"${total_cost:,.2f}"
-        )
-
-        st.subheader("Agent Findings")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.markdown("### 💰 Cost Analyst")
-            cheapest = df.loc[df["Unit Price"].idxmin()]
-            st.write(
-                f"Cheapest supplier: {cheapest['Supplier']} "
-                f"at ${cheapest['Unit Price']}"
+            st.warning(
+                "Claude completed but no output file was created."
             )
 
-        with col2:
-            st.markdown("### 📊 Performance Analyst")
-            best_quality = df.loc[df["Quality Score"].idxmax()]
-            st.write(
-                f"Highest quality supplier: "
-                f"{best_quality['Supplier']} "
-                f"({best_quality['Quality Score']})"
+            st.session_state.claude_details = result.stdout
+
+        else:
+
+            recommendation = latest_file.read_text(
+                encoding="utf-8"
             )
 
-        with col3:
-            st.markdown("### ⚠️ Risk Analyst")
-            high_risk = df[
-                df["Risk Level"].str.lower() == "high"
-            ]
+            # SAVE RESULT IN SESSION STATE
+            st.session_state.recommendation = recommendation
+            st.session_state.output_file = latest_file.name
+            st.session_state.claude_details = result.stdout
 
-            if len(high_risk) > 0:
-                st.write(
-                    "High-risk supplier(s): "
-                    + ", ".join(high_risk["Supplier"].tolist())
-                )
-            else:
-                st.write("No high-risk suppliers identified.")
+            st.session_state.decision = "Pending Review"
 
-        st.warning(
-            "Status: HUMAN APPROVAL REQUIRED"
+            st.success(
+                "✅ Multi-agent analysis completed"
+            )
+
+
+# ---------------------------------------------------
+# DISPLAY SAVED RESULT
+# ---------------------------------------------------
+
+if st.session_state.recommendation:
+
+    st.divider()
+
+    st.subheader(
+        "📋 Procurement Recommendation"
+    )
+
+    st.markdown(
+        st.session_state.recommendation
+    )
+
+    st.info(
+        f"Saved as: {st.session_state.output_file}"
+    )
+
+    st.divider()
+
+
+    # ---------------------------------------------------
+    # HUMAN REVIEW
+    # ---------------------------------------------------
+
+    st.subheader(
+        "👤 Human Review"
+    )
+
+    st.warning(
+        "Status: HUMAN APPROVAL REQUIRED"
+    )
+
+    st.write(
+        "This is an AI-generated recommendation only. "
+        "The final procurement decision remains with "
+        "the human procurement manager."
+    )
+
+    decision = st.radio(
+        "Review decision",
+        [
+            "Pending Review",
+            "Approve Recommendation",
+            "Request Changes",
+            "Reject Recommendation"
+        ],
+        key="decision"
+    )
+
+
+    # ---------------------------------------------------
+    # APPROVE
+    # ---------------------------------------------------
+
+    if decision == "Approve Recommendation":
+
+        st.success(
+            "✅ Human approval indicated."
         )
 
         st.write(
-            "This is an AI-generated recommendation. "
-            "The final procurement decision remains with the procurement manager."
+            "The recommendation has been reviewed by the human user."
         )
+
+        st.info(
+            "Formal procurement sign-off remains the responsibility "
+            "of the procurement manager."
+        )
+
+
+    # ---------------------------------------------------
+    # REQUEST CHANGES
+    # ---------------------------------------------------
+
+    elif decision == "Request Changes":
+
+        st.warning(
+            "Human reviewer has requested changes."
+        )
+
+        changes = st.text_area(
+            "Describe the changes required",
+            key="change_request"
+        )
+
+        if st.button(
+            "Record Change Request"
+        ):
+
+            if changes.strip():
+
+                st.success(
+                    "Change request recorded."
+                )
+
+                st.write(
+                    changes
+                )
+
+            else:
+
+                st.warning(
+                    "Please describe the requested changes."
+                )
+
+
+    # ---------------------------------------------------
+    # REJECT
+    # ---------------------------------------------------
+
+    elif decision == "Reject Recommendation":
+
+        st.error(
+            "❌ Recommendation rejected by human reviewer."
+        )
+
+        st.write(
+            "The recommendation will not be treated as a final procurement decision."
+        )
+
+
+    # ---------------------------------------------------
+    # TECHNICAL DETAILS
+    # ---------------------------------------------------
+
+    if st.session_state.claude_details:
+
+        with st.expander(
+            "🔍 Technical execution details"
+        ):
+
+            st.text(
+                st.session_state.claude_details
+            )
+
+
+# ---------------------------------------------------
+# RESET BUTTON
+# ---------------------------------------------------
+
+if st.session_state.recommendation:
+
+    st.divider()
+
+    if st.button(
+        "🔄 Start New Analysis"
+    ):
+
+        st.session_state.recommendation = None
+        st.session_state.output_file = None
+        st.session_state.claude_details = None
+        st.session_state.decision = "Pending Review"
+
+        st.rerun()
+
+
+# ---------------------------------------------------
+# FOOTER
+# ---------------------------------------------------
+
+st.divider()
+
+st.caption(
+    "Built using Claude Code | "
+    "Cost Analyst + Performance Analyst + Risk Analyst"
+)

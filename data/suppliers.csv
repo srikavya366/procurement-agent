@@ -1,0 +1,6 @@
+Supplier,Unit Price,Quality Score,Lead Time Days,OTIF %,Risk Level,Capacity
+Supplier A,12.50,8.5,14,92,Low,5000
+Supplier B,11.20,7.2,21,85,Medium,8000
+Supplier C,13.80,9.1,10,97,Low,3000
+Supplier D,10.75,6.5,28,78,High,10000
+Supplier E,12.90,8.8,16,90,Medium,4500
